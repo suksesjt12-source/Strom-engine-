@@ -59,14 +59,57 @@ Mat4 perspective(float f,float aspect,float n,float far) {
     return r;
 }
 
+// Correct look-at camera
 Mat4 camera() {
+    Vec3 eye={0.0f,3.0f,10.0f};
+    Vec3 target={0.0f,1.0f,0.0f};
+    Vec3 up={0.0f,1.0f,0.0f};
+
+    auto norm=[](Vec3 v) {
+        float n=sqrtf(v.x*v.x+v.y*v.y+v.z*v.z);
+        if(n<0.00001f) return Vec3{0,0,0};
+        return Vec3{v.x/n,v.y/n,v.z/n};
+    };
+
+    auto cross=[](Vec3 a,Vec3 b) {
+        return Vec3{
+            a.y*b.z-a.z*b.y,
+            a.z*b.x-a.x*b.z,
+            a.x*b.y-a.y*b.x
+        };
+    };
+
+    auto dot=[](Vec3 a,Vec3 b) {
+        return a.x*b.x+a.y*b.y+a.z*b.z;
+    };
+
+    Vec3 f=norm({
+        target.x-eye.x,
+        target.y-eye.y,
+        target.z-eye.z
+    });
+
+    Vec3 s=norm(cross(f,up));
+    Vec3 u=cross(s,f);
+
     Mat4 r=identity();
-    r.m[5]=0.8944f;
-    r.m[6]=-0.4472f;
-    r.m[9]=0.4472f;
-    r.m[10]=0.8944f;
-    r.m[13]=-2.6832f;
-    r.m[14]=-8.944f;
+
+    r.m[0]=s.x;
+    r.m[1]=u.x;
+    r.m[2]=-f.x;
+
+    r.m[4]=s.y;
+    r.m[5]=u.y;
+    r.m[6]=-f.y;
+
+    r.m[8]=s.z;
+    r.m[9]=u.z;
+    r.m[10]=-f.z;
+
+    r.m[12]=-dot(s,eye);
+    r.m[13]=-dot(u,eye);
+    r.m[14]=dot(f,eye);
+
     return r;
 }
 
@@ -99,9 +142,7 @@ void main() {
     vec3 N=normalize(normal);
     vec3 L=normalize(vec3(-0.5,0.8,0.6));
     float light=max(dot(N,L),0.0);
-
-    float shade=light>0.75 ? 1.0 :
-                light>0.35 ? 0.75 : 0.42;
+    float shade=0.35+light*0.65;
 
     FragColor=vec4(uColor*shade,1.0);
 }
@@ -168,7 +209,6 @@ float enemyHP=100;
 float attackTimer=0;
 float enemyTimer=0;
 float attackAnim=0;
-
 float moveInput=0;
 
 bool attackHeld=false;
@@ -187,9 +227,11 @@ GLuint shader(GLenum type,const char* src) {
     glGetShaderiv(s,GL_COMPILE_STATUS,&ok);
 
     if(!ok) {
-        char log[1024];
-        glGetShaderInfoLog(s,1024,nullptr,log);
+        char log[2048]={0};
+        glGetShaderInfoLog(s,sizeof(log),nullptr,log);
         LOG("Shader error: %s",log);
+        glDeleteShader(s);
+        return 0;
     }
 
     return s;
@@ -199,43 +241,52 @@ void initGraphics() {
     GLuint vs=shader(GL_VERTEX_SHADER,VS);
     GLuint fs=shader(GL_FRAGMENT_SHADER,FS);
 
+    if(!vs || !fs) {
+        if(vs) glDeleteShader(vs);
+        if(fs) glDeleteShader(fs);
+        return;
+    }
+
     program=glCreateProgram();
     glAttachShader(program,vs);
     glAttachShader(program,fs);
     glLinkProgram(program);
 
+    GLint linked=GL_FALSE;
+    glGetProgramiv(program,GL_LINK_STATUS,&linked);
+
+    if(linked!=GL_TRUE) {
+        char log[2048]={0};
+        glGetProgramInfoLog(program,sizeof(log),nullptr,log);
+        LOG("Program link failed: %s",log);
+        glDeleteProgram(program);
+        program=0;
+    }
+
     glDeleteShader(vs);
     glDeleteShader(fs);
+
+    if(!program) return;
 
     glGenVertexArrays(1,&vao);
     glBindVertexArray(vao);
 
     glGenBuffers(1,&vbo);
     glBindBuffer(GL_ARRAY_BUFFER,vbo);
-
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        sizeof(cube),
-        cube,
-        GL_STATIC_DRAW
-    );
+    glBufferData(GL_ARRAY_BUFFER,sizeof(cube),cube,GL_STATIC_DRAW);
 
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(
-        0,3,GL_FLOAT,GL_FALSE,
-        6*sizeof(float),(void*)0
-    );
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)0);
 
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(
-        1,3,GL_FLOAT,GL_FALSE,
-        6*sizeof(float),(void*)(3*sizeof(float))
-    );
+    glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)(3*sizeof(float)));
 
     glEnable(GL_DEPTH_TEST);
-    glEnable(GL_CULL_FACE);
+    glDisable(GL_CULL_FACE);
 
-    glClearColor(0.35f,0.55f,0.82f,1);
+    glClearColor(0.08f,0.12f,0.20f,1.0f);
+
+    LOG("OpenGL renderer initialized");
 }
 
 void draw(
@@ -244,11 +295,9 @@ void draw(
     float sx,float sy,float sz,
     Vec3 color
 ) {
-    Mat4 model=mul(
-        translate(x,y,z),
-        scale(sx,sy,sz)
-    );
+    if(!program) return;
 
+    Mat4 model=mul(translate(x,y,z),scale(sx,sy,sz));
     Mat4 mvp=mul(vp,model);
 
     glUseProgram(program);
@@ -272,7 +321,7 @@ void draw(
     glDrawArrays(GL_TRIANGLES,0,36);
 }
 
-void fighter(Mat4 vp,float x,bool enemy,float t) {
+void fighter(Mat4 vp,float x,bool enemy) {
     Vec3 body=enemy
         ? Vec3{0.75f,0.10f,0.18f}
         : Vec3{0.10f,0.30f,0.95f};
@@ -283,18 +332,24 @@ void fighter(Mat4 vp,float x,bool enemy,float t) {
         ? Vec3{0.10f,0.04f,0.08f}
         : Vec3{0.05f,0.03f,0.12f};
 
+    float arm=(!enemy && attackAnim>0)?0.45f:0;
+
+    // Legs
     draw(vp,x-0.20f,0.48f,0,
         0.20f,0.85f,0.24f,body);
 
     draw(vp,x+0.20f,0.48f,0,
         0.20f,0.85f,0.24f,body);
 
+    // Torso
     draw(vp,x,1.35f,0,
         0.72f,0.90f,0.40f,body);
 
+    // Head
     draw(vp,x,2.15f,0,
         0.48f,0.55f,0.43f,skin);
 
+    // Hair
     draw(vp,x,2.47f,0,
         0.58f,0.24f,0.52f,hair);
 
@@ -304,8 +359,7 @@ void fighter(Mat4 vp,float x,bool enemy,float t) {
     draw(vp,x+0.18f,2.37f,0,
         0.20f,0.28f,0.20f,hair);
 
-    float arm=(!enemy && attackAnim>0)?0.45f:0;
-
+    // Arms
     draw(vp,x-0.48f,1.40f,0,
         0.20f,0.72f,0.23f,skin);
 
@@ -324,36 +378,39 @@ void healthBar(Mat4 vp,float x,float y,float value,Vec3 color) {
 }
 
 void render(float t) {
+    (void)t;
+
     glViewport(0,0,W,H);
 
-    glClear(
-        GL_COLOR_BUFFER_BIT|
-        GL_DEPTH_BUFFER_BIT
-    );
+    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+
+    if(!program) return;
 
     Mat4 proj=perspective(
-        0.90f,(float)W/H,0.1f,100
+        0.90f,(float)W/H,0.1f,100.0f
     );
 
     Mat4 vp=mul(proj,camera());
 
+    // Arena floor
     draw(vp,0,-0.12f,0,
         12,0.2f,10,
         {0.24f,0.28f,0.34f});
 
+    // Arena center line
     draw(vp,0,0.001f,0,
         5.5f,0.012f,0.06f,
         {0.9f,0.9f,0.9f});
 
-    fighter(vp,playerX,false,t);
-    fighter(vp,enemyX,true,t);
+    // Fighters
+    fighter(vp,playerX,false);
+    fighter(vp,enemyX,true);
 
-    healthBar(vp,-2.7f,3.5f,
-        playerHP/100.0f,
+    // Health bars
+    healthBar(vp,-2.7f,3.5f,playerHP/100.0f,
         {0.05f,0.9f,0.2f});
 
-    healthBar(vp,2.7f,3.5f,
-        enemyHP/100.0f,
+    healthBar(vp,2.7f,3.5f,enemyHP/100.0f,
         {0.95f,0.05f,0.05f});
 }
 
@@ -384,8 +441,7 @@ void update(float dt) {
     }
 
     if(std::fabs(playerX-enemyX)>1.2f) {
-        enemyX+=
-            (playerX>enemyX?1.0f:-1.0f)*dt*1.1f;
+        enemyX+=(playerX>enemyX?1.0f:-1.0f)*dt*1.1f;
     }
     else if(enemyTimer<=0) {
         enemyTimer=1.2f;
@@ -499,10 +555,13 @@ void shutdownEGL() {
 void initEGL(android_app* app) {
     display=eglGetDisplay(EGL_DEFAULT_DISPLAY);
 
-    if(display==EGL_NO_DISPLAY)
+    if(display==EGL_NO_DISPLAY) {
+        LOG("Cannot get EGL display");
         return;
+    }
 
     if(eglInitialize(display,nullptr,nullptr)!=EGL_TRUE) {
+        LOG("EGL initialize failed: %x",eglGetError());
         display=EGL_NO_DISPLAY;
         return;
     }
@@ -522,11 +581,13 @@ void initEGL(android_app* app) {
 
     if(eglChooseConfig(display,attrs,&config,1,&count)!=EGL_TRUE ||
        count<1) {
+        LOG("EGL config selection failed: %x",eglGetError());
         shutdownEGL();
         return;
     }
 
     EGLint format=0;
+
     eglGetConfigAttrib(
         display,config,EGL_NATIVE_VISUAL_ID,&format
     );
@@ -545,6 +606,7 @@ void initEGL(android_app* app) {
     );
 
     if(surface==EGL_NO_SURFACE) {
+        LOG("EGL surface creation failed: %x",eglGetError());
         shutdownEGL();
         return;
     }
@@ -554,6 +616,7 @@ void initEGL(android_app* app) {
     );
 
     if(context==EGL_NO_CONTEXT) {
+        LOG("EGL context creation failed: %x",eglGetError());
         shutdownEGL();
         return;
     }
@@ -561,6 +624,7 @@ void initEGL(android_app* app) {
     if(eglMakeCurrent(
         display,surface,surface,context
     )!=EGL_TRUE) {
+        LOG("EGL make current failed: %x",eglGetError());
         shutdownEGL();
         return;
     }
@@ -570,15 +634,22 @@ void initEGL(android_app* app) {
     eglQuerySurface(display,surface,EGL_WIDTH,&W);
     eglQuerySurface(display,surface,EGL_HEIGHT,&H);
 
+    LOG("EGL ready: %dx%d",W,H);
+
     initGraphics();
+
+    if(!program)
+        LOG("Graphics initialization failed");
 }
 
 void command(android_app* app,int32_t cmd) {
     if(cmd==APP_CMD_INIT_WINDOW && app->window)
         initEGL(app);
 
-    if(cmd==APP_CMD_TERM_WINDOW)
+    if(cmd==APP_CMD_TERM_WINDOW) {
         shutdownEGL();
+        lastTime=0;
+    }
 }
 
 void android_main(android_app* app) {
@@ -603,8 +674,10 @@ void android_main(android_app* app) {
         }
 
         if(display==EGL_NO_DISPLAY ||
-           surface==EGL_NO_SURFACE)
+           surface==EGL_NO_SURFACE) {
+            usleep(10000);
             continue;
+        }
 
         timespec ts{};
         clock_gettime(CLOCK_MONOTONIC,&ts);
@@ -624,7 +697,6 @@ void android_main(android_app* app) {
 
         if(eglSwapBuffers(display,surface)!=EGL_TRUE) {
             EGLint error=eglGetError();
-
             LOG("Swap error: %x",error);
 
             if(error==EGL_CONTEXT_LOST ||
